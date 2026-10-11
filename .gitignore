@@ -12,7 +12,6 @@ benchmark-*.json
 .env.*
 *.key
 *.pem
-n8n-api-key
 
 # Sampah OS/editor
 .DS_Store
