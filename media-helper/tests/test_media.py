@@ -97,7 +97,7 @@ class RenderTests(unittest.TestCase):
         source = make_pdf(3)
         result = server.render_pdf(source)
         sizes = [len(base64.b64decode(page["data_base64"])) for page in result["pages"]]
-        # JPEG riil cukup kecil; turunkan cap agar tes cepat dan tetap memakai Poppler.
+        # Real JPEGs are small; lower the cap so the test stays fast while still exercising Poppler.
         with patch.object(server, "MAX_JPEG_BYTES", max(sizes) + 1):
             self.assert_rejected(source, "INPUT_LIMIT_EXCEEDED")
 
@@ -163,7 +163,7 @@ class HttpTests(unittest.TestCase):
             connection.close()
 
     def headers_only(self, headers, path="/render-pdf"):
-        # Tidak mengirim body: respons segera membuktikan penolakan sebelum buffering.
+        # No body is sent: an immediate response proves rejection happens before buffering.
         with socket.create_connection(("127.0.0.1", self.port), timeout=2) as connection:
             connection.sendall((f"POST {path} HTTP/1.1\r\nHost: localhost\r\n" + headers + "\r\n").encode())
             response = http.client.HTTPResponse(connection)
@@ -173,7 +173,7 @@ class HttpTests(unittest.TestCase):
     def test_real_http_health(self):
         status, payload, headers = self.request("GET", "/health")
         self.assertEqual(status, 200)
-        self.assertEqual(payload, {"status": "ok", "media_version": "media-v1"})
+        self.assertEqual(payload, {"status": "ok", "media_version": server.MEDIA_VERSION})
         self.assertEqual(headers["Cache-Control"], "no-store")
 
     def test_real_http_three_page_render(self):

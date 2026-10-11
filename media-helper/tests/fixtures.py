@@ -1,4 +1,4 @@
-"""PDF anonim asli, termasuk enkripsi Standard R2; hanya Python stdlib."""
+"""Real anonymous PDFs, including Standard R2 encryption; Python standard library only."""
 
 import hashlib
 import struct
@@ -29,7 +29,7 @@ def _rc4(key, value):
 
 
 def make_pdf(pages=3, encrypted=False, corrupt_last=False, empty_password=False):
-    """Tidak memakai nama/NIM siswa atau software PDF eksternal."""
+    """Uses no student names/IDs and no external PDF software."""
     file_id = hashlib.md5(b"project2-anonymous-fixture", usedforsecurity=False).digest()
     objects = [b"<< /Type /Catalog /Pages 2 0 R >>", b"", b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
     file_key = None
@@ -52,7 +52,7 @@ def make_pdf(pages=3, encrypted=False, corrupt_last=False, empty_password=False)
             (f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] "
              f"/Resources << /Font << /F1 3 0 R >> >> /Contents {stream_id} 0 R >>").encode()
         )
-        content = f"BT /F1 18 Tf 30 330 Td (Halaman anonim {page}) Tj ET\n".encode()
+        content = f"BT /F1 18 Tf 30 330 Td (Anonymous page {page}) Tj ET\n".encode()
         if corrupt_last and page == pages:
             content = b"BT /F1 18 Tf (unterminated\n"
         if encrypted:

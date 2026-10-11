@@ -1,4 +1,4 @@
-"""Helper PDF stateless; tidak menerima path/URL dan tidak mencatat isi submission."""
+"""Stateless PDF helper; accepts no paths/URLs and logs no submission content."""
 
 import base64
 import hashlib
@@ -16,8 +16,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 MAX_SOURCE_BYTES = 25 * 1024 * 1024
 MAX_PAGES = 12
 MAX_JPEG_BYTES = 5 * 1024 * 1024
-# Skala 1200 px / kualitas 70 (media-v3): payload lebih kecil; WAJIB uji ulang keterbacaan,
-# kembali ke 1600 bila tulisan tangan mulai sulit dibaca.
+# 1200 px scale / quality 70 (media-v3): smaller payloads; ALWAYS re-test readability
+# and go back to 1600 when handwriting becomes hard to read.
 RENDER_SCALE_PX = 1200
 RENDER_JPEG_QUALITY = 70
 RENDER_SECONDS = 45
@@ -26,14 +26,14 @@ DIAGNOSTIC_BYTES = 64 * 1024
 MEDIA_VERSION = "media-v3"
 
 MESSAGES = {
-    "INPUT_LIMIT_EXCEEDED": "Batas berkas, halaman, atau gambar terlampaui; unggah ulang versi lebih kecil.",
-    "PDF_INVALID": "PDF rusak atau tidak dapat dirender utuh; unggah ulang PDF yang valid.",
-    "PDF_ENCRYPTED": "PDF terenkripsi tidak didukung; unggah ulang PDF tanpa enkripsi.",
-    "RENDER_TIMEOUT": "Render seluruh PDF melewati 45 detik; unggah ulang versi lebih sederhana.",
-    "FILE_UNSUPPORTED": "Endpoint hanya menerima byte mentah application/pdf.",
-    "REQUEST_INVALID": "Request memerlukan satu Content-Length valid, tanpa URL/path atau Transfer-Encoding.",
-    "UPLOAD_TIMEOUT": "Pengiriman PDF melewati batas waktu.",
-    "MEDIA_INTERNAL": "Helper gagal memproses berkas; tidak ada halaman yang dikembalikan.",
+    "INPUT_LIMIT_EXCEEDED": "File, page, or image limit exceeded; upload a smaller version.",
+    "PDF_INVALID": "PDF is corrupt or cannot be rendered completely; upload a valid PDF.",
+    "PDF_ENCRYPTED": "Encrypted PDFs are not supported; upload a PDF without encryption.",
+    "RENDER_TIMEOUT": "Rendering the whole PDF exceeded 45 seconds; upload a simpler version.",
+    "FILE_UNSUPPORTED": "This endpoint only accepts raw application/pdf bytes.",
+    "REQUEST_INVALID": "The request needs a single valid Content-Length, with no URL/path or Transfer-Encoding.",
+    "UPLOAD_TIMEOUT": "Uploading the PDF exceeded the time limit.",
+    "MEDIA_INTERNAL": "The helper failed to process the file; no pages were returned.",
 }
 
 
@@ -66,7 +66,7 @@ def _stop(process):
 
 
 def _run(arguments, directory, deadline, label):
-    """Batasi waktu/diagnostik/output selama proses berjalan, bukan sesudah buffering."""
+    """Bound time, diagnostics, and output while the process runs, not after buffering."""
     out_path = Path(directory) / (label + ".stdout")
     err_path = Path(directory) / (label + ".stderr")
     with out_path.open("wb") as stdout, err_path.open("wb") as stderr:
@@ -87,7 +87,7 @@ def _run(arguments, directory, deadline, label):
                 time.sleep(min(0.02, max(0, deadline - time.monotonic())))
         finally:
             _stop(process)
-    # Tutup race proses selesai tepat di antara stat() dan poll().
+    # Close the race where the process finishes right between stat() and poll().
     _check_output_limit(directory)
     if out_path.stat().st_size + err_path.stat().st_size > DIAGNOSTIC_BYTES:
         raise MediaError("PDF_INVALID", 422)
@@ -109,12 +109,12 @@ def _render_path(source_path, directory):
     status, info, errors = _run(
         ["/usr/bin/pdfinfo", str(source_path)], directory, deadline, "info",
     )
-    # Password-protected PDF gagal sebelum pdfinfo dapat mencetak metadata.
+    # Password-protected PDFs fail before pdfinfo can print metadata.
     if re.search(rb"password|encrypted", errors, re.IGNORECASE):
         raise MediaError("PDF_ENCRYPTED", 422)
     if re.search(rb"^Encrypted:\s+yes\b", info, re.MULTILINE):
         raise MediaError("PDF_ENCRYPTED", 422)
-    # Poppler kadang melakukan repair sambil exit 0; jangan menerima PDF parsial.
+    # Poppler sometimes repairs while exiting 0; never accept a partial PDF.
     if status != 0 or errors.strip():
         raise MediaError("PDF_INVALID", 422)
     match = re.search(rb"^Pages:\s+(\d+)\s*$", info, re.MULTILINE)
@@ -140,7 +140,7 @@ def _render_path(source_path, directory):
     if sorted(files) != list(range(1, page_count + 1)):
         raise MediaError("PDF_INVALID", 422)
     pages = []
-    # Semua output sudah lengkap dan ukurannya sah sebelum satu halaman pun dikirim.
+    # All output is complete and size-checked before a single page is sent.
     for page in range(1, page_count + 1):
         data = files[page].read_bytes()
         if len(data) < 4 or not data.startswith(b"\xff\xd8") or not data.endswith(b"\xff\xd9"):
@@ -153,7 +153,7 @@ def _render_path(source_path, directory):
 
 
 def render_pdf(source, temp_root=None):
-    """Entry point byte untuk pengujian; HTTP menulis streaming ke tempfile."""
+    """Byte entry point used by tests; the HTTP server streams to a temp file."""
     if len(source) > MAX_SOURCE_BYTES:
         raise MediaError("INPUT_LIMIT_EXCEEDED", 413)
     with tempfile.TemporaryDirectory(prefix="p2-media-", dir=temp_root) as directory:
@@ -163,7 +163,7 @@ def render_pdf(source, temp_root=None):
 
 
 class MediaServer(HTTPServer):
-    # Serial: hanya satu render/source aktif; backlog dan jumlah proses juga dibatasi.
+    # Serial: only one render/source is active at a time; backlog and process count are bounded too.
     request_queue_size = 4
     allow_reuse_address = True
 
@@ -173,7 +173,7 @@ class MediaServer(HTTPServer):
         return connection, address
 
     def handle_error(self, request, client_address):
-        # Jangan cetak traceback yang dapat memuat lokasi/isi submission.
+        # Never print tracebacks that could contain submission paths or content.
         pass
 
 
@@ -229,13 +229,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path != "/health":
-            self._reply(404, {"error": {"code": "NOT_FOUND", "message": "Endpoint tidak ditemukan."}})
+            self._reply(404, {"error": {"code": "NOT_FOUND", "message": "Endpoint not found."}})
             return
         self._reply(200, {"status": "ok", "media_version": MEDIA_VERSION})
 
     def do_POST(self):
         try:
-            length = self._source_length()  # Validasi sebelum read/buffer body.
+            length = self._source_length()  # Validate before reading/buffering the body.
             with tempfile.TemporaryDirectory(prefix="p2-media-") as directory:
                 source_path = Path(directory) / "source.pdf"
                 remaining = length
