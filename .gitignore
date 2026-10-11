@@ -1,0 +1,20 @@
+# Berkas internal / data lokal — jangan pernah di-commit
+PLAN.md
+baseline-*.json
+benchmark-*.json
+
+# Materi ujian & data siswa
+/tests/
+*.docx
+
+# Rahasia & konfigurasi lokal
+.env
+.env.*
+*.key
+*.pem
+n8n-api-key
+
+# Sampah OS/editor
+.DS_Store
+__pycache__/
+*.pyc
