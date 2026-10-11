@@ -253,6 +253,9 @@ Run the sidecar unit tests (no Docker required):
 cd media-helper && python3 -m unittest discover -s tests -v
 ```
 
+> Note: every user-facing string — node names, form labels, status markers, AI prompts, error messages — is
+> in English. Some internal code identifiers inside the Code nodes keep their original names.
+
 ## Troubleshooting
 
 | Symptom | Likely cause & fix |
