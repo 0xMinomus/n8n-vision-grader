@@ -1,254 +1,253 @@
-# CekNilai — Penilai Tugas Mahasiswa Otomatis (n8n)
+# AI Assignment Grader — n8n workflow for automated grading
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![n8n](https://img.shields.io/badge/n8n-workflow-EA4B71.svg)](https://n8n.io)
 [![Docker](https://img.shields.io/badge/docker-compose-2496ED.svg)](https://docs.docker.com/compose/)
 
-Workflow **n8n** untuk menilai tugas mahasiswa secara otomatis. Dosen mengirim satu folder Google Drive
-berisi hasil pekerjaan mahasiswa; sistem mengunduh berkas **satu per satu**, merender PDF menjadi gambar,
-mengirim soal + kunci + seluruh halaman jawaban ke model AI **vision** dalam **satu panggilan per berkas**,
-lalu menulis nilai ke Google Sheets — diakhiri satu baris penutup `SELESAI`.
+An **n8n** workflow that grades student assignments automatically. The lecturer submits one Google Drive
+folder with the students' work; the system downloads the files **one at a time**, renders PDFs into images,
+sends the exam sheet + answer key + every answer page to a **vision** LLM in a **single call per file**, and
+writes the results to Google Sheets — finishing with one `DONE` summary row.
 
-*An n8n workflow that grades student assignments from a Google Drive folder using a vision LLM (one call per
-file) and writes the results to Google Sheets.*
+- Main artifact: [`penilai-otomatis-tugas.json`](penilai-otomatis-tugas.json) — import this file into n8n.
+- Render sidecar: [`compose.media.yml`](compose.media.yml) + [`media-helper/`](media-helper/) — PDF → JPEG.
+- **No credentials are included** in this repository; connect your own accounts after importing (see [Installation](#installation)).
 
-- Berkas utama: [`penilai-otomatis-tugas.json`](penilai-otomatis-tugas.json) — impor langsung ke n8n.
-- Sidecar render: [`compose.media.yml`](compose.media.yml) + [`media-helper/`](media-helper/) — PDF → gambar.
-- Semua kredensial **tidak** disertakan di repo ini; hubungkan ulang akun Anda setelah impor (lihat [Instalasi](#instalasi)).
+## Table of contents
 
-## Daftar isi
-
-- [Fitur](#fitur)
-- [Cara kerja](#cara-kerja)
-- [Komponen](#komponen)
-- [Prasyarat](#prasyarat)
-- [Instalasi](#instalasi)
-- [Bidang form](#bidang-form)
-- [Aturan nama berkas & identitas](#aturan-nama-berkas--identitas)
-- [Rubrik penilaian & bobot](#rubrik-penilaian--bobot)
-- [Perilaku & batas](#perilaku--batas)
-- [Konfigurasi lanjutan](#konfigurasi-lanjutan)
-- [Struktur repo](#struktur-repo)
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Components](#components)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Form fields](#form-fields)
+- [File naming & student identity](#file-naming--student-identity)
+- [Grading rubric & weights](#grading-rubric--weights)
+- [Behavior & limits](#behavior--limits)
+- [Advanced configuration](#advanced-configuration)
+- [Repository structure](#repository-structure)
 - [Troubleshooting](#troubleshooting)
-- [Keamanan & privasi](#keamanan--privasi)
-- [Lisensi](#lisensi)
+- [Security & privacy](#security--privacy)
+- [License](#license)
 
-## Fitur
+## Features
 
-- **Satu panggilan AI per berkas** — soal, kunci dosen, dan semua halaman jawaban dikirim sekaligus sebagai
-  satu permintaan multimodal (gambar), bukan per soal.
-- **Dukungan PDF & gambar** — PDF dirender ke JPEG oleh sidecar internal; JPG/PNG dinormalisasi langsung.
-- **Kunci fleksibel** — kunci jawaban boleh ada di dalam file soal (dibaca model) atau diisi di form.
-- **Nilai berbobot opsional** — isi bobot per nomor soal di form, nilai akhir otomatis dinormalisasi.
-- **Pilihan ganda deterministik** — huruf pilihan dibandingkan oleh kode (bukan model) dengan kunci di form.
-- **Identitas dari nama berkas** — NIM/Nama diekstrak deterministik dari pola `NIM_Nama` / `Nama_NIM`,
-  lengkap dengan validasi format, duplikat, dan konsistensi panjang digit.
-- **Tanda `PERLU DIPERIKSA`** — berkas buram, respons tidak valid, NIM bermasalah, atau kegagalan transport
-  tidak menghentikan proses; baris tetap ditulis tanpa nilai beserta alasannya.
-- **Baris penutup `SELESAI`** — ringkasan jumlah berkas dinilai setelah loop selesai.
-- **Sidecar tanpa kunci & tanpa port publik** — container read-only, tanpa akses keluar jaringan, dibatasi CPU/memori.
+- **One AI call per file** — exam sheet, lecturer answer key, and all answer pages are sent together as a
+  single multimodal (image) request, not one call per question.
+- **PDF & image support** — PDFs are rendered to JPEG by the bundled sidecar; JPG/PNG files are normalized directly.
+- **Flexible answer key** — the key can live inside the exam file (read by the model) or be pasted into the form.
+- **Optional per-question weights** — enter weights in the form and the final score is weighted automatically.
+- **Deterministic multiple choice** — chosen letters are compared against the key **by code**, not by the model.
+- **Identity from the file name** — student ID and name are parsed deterministically from `NIM_Name` /
+  `Name_NIM` patterns, including format validation, duplicate detection, and digit-length consistency checks.
+- **`NEEDS REVIEW` safety marker** — blurry pages, invalid responses, ID problems, or transport failures never
+  stop the run; the row is still written without a score, together with the reason.
+- **`DONE` closing row** — a summary line with the number of graded files is appended when the loop finishes.
+- **Keyless, portless sidecar** — read-only container with no host port, no outbound network, and CPU/memory limits.
 
-## Cara kerja
+## How it works
 
 ```mermaid
 flowchart LR
-    F[Form<br/>folder + soal + kunci + bobot] --> SA[Siapkan Acuan]
-    SA --> TS{Cek Tipe Soal}
-    TS -->|PDF| RSO[Render Soal PDF<br/>sidecar]
-    TS -->|gambar| NG[Normalisasi Gambar Soal]
-    RSO --> SU[Susun Acuan]
-    NG --> SU
-    SU --> D[Cari File Tugas] --> FL[Filter PDF/Gambar] --> L[Proses Satu File<br/>1 berkas/iterasi]
-    L -->|per berkas| W[Jeda 1 detik] --> DL[Download File] --> JF{PDF?}
-    JF -->|Ya| RP[Render PDF Siswa<br/>sidecar] --> GP[Satukan Halaman PDF]
-    JF -->|Tidak| NI[Normalisasi Gambar Siswa]
-    GP --> SP[Susun Permintaan]
-    NI --> SP
-    SP --> MR[POST ke endpoint AI] --> SH[Susun Hasil<br/>NIM + bobot] --> GS[Simpan ke Google Sheets] --> L
-    L -->|done| RS[Rangkum Selesai] --> BP[Baris Penutup<br/>SELESAI di sheet]
+    F[Grading Form<br/>folder + exam + key + weights] --> PR[Prepare Reference]
+    PR --> CET{Check Exam Type}
+    CET -->|PDF| REP[Render Exam PDF<br/>sidecar]
+    CET -->|image| NEI[Normalize Exam Image]
+    REP --> BR[Build Reference]
+    NEI --> BR
+    BR --> LS[List Submission Files] --> FI[Filter PDFs and Images] --> POF[Process One File<br/>one file per iteration]
+    POF -->|per file| DBF[Delay Between Files] --> DF[Download File] --> CFT{PDF?}
+    CFT -->|Yes| RSP[Render Student PDF<br/>sidecar] --> MPP[Merge PDF Pages]
+    CFT -->|No| NSI[Normalize Student Image]
+    MPP --> BAR[Build AI Request]
+    NSI --> BAR
+    BAR --> CAM[Call AI Model] --> RES[Build Result<br/>student ID + weights] --> SGS[Save to Google Sheets] --> POF
+    POF -->|done| SR[Summarize Run] --> CR[Closing Row<br/>DONE row in the sheet]
 ```
 
-## Komponen
+## Components
 
-| Komponen | Peran |
+| Component | Role |
 |---|---|
-| Workflow n8n (`penilai-otomatis-tugas.json`) | Orkestrasi seluruh alur: validasi form, pencarian berkas, render, panggilan AI, penulisan nilai. |
-| Sidecar media (`project2-media`) | HTTP service kecil (`POST /render-pdf`, `GET /health`) untuk mengubah PDF menjadi JPEG per halaman memakai Poppler. |
-| Google Drive (OAuth2) | Sumber berkas soal dan folder jawaban mahasiswa. |
-| Google Sheets (OAuth2) | Tujuan penulisan hasil penilaian. |
-| Endpoint AI OpenAI-compatible | Harus **mendukung input gambar (vision)**; satu panggilan per berkas. |
+| n8n workflow (`penilai-otomatis-tugas.json`) | Orchestrates everything: form validation, file listing, rendering, AI calls, writes scores. |
+| Media sidecar (`project2-media`) | Small HTTP service (`POST /render-pdf`, `GET /health`) that turns PDFs into JPEG pages using Poppler. |
+| Google Drive (OAuth2) | Source of the exam file and the students' submission folder. |
+| Google Sheets (OAuth2) | Destination for the grading results. |
+| OpenAI-compatible AI endpoint | Must support **image input (vision)**; one call per file. |
 
-## Prasyarat
+## Requirements
 
-- **n8n** yang berjalan di Docker (diuji pada n8n 2.42.x) dengan task runner bawaan aktif.
-- **Docker + Docker Compose** di host yang sama dengan n8n (untuk sidecar media).
-- **Akun Google** dengan akses ke Drive folder dan spreadsheet tujuan (OAuth2 untuk Drive & Sheets).
-- **Endpoint AI OpenAI-compatible** dengan dukungan gambar, misalnya router/LLM gateway Anda sendiri,
-  OpenRouter, atau endpoint internal kampus. Nilai di workflow (`Panggil Model Router`) hanya **contoh** —
-  ganti dengan endpoint Anda.
+- **n8n** running in Docker (tested on n8n 2.42.x) with its default task runner enabled.
+- **Docker + Docker Compose** on the same host as n8n (for the media sidecar).
+- **A Google account** with access to the Drive folder and the target spreadsheet (OAuth2 for Drive & Sheets).
+- **An OpenAI-compatible AI endpoint with vision support** — your own router/gateway, OpenRouter, or an
+  institutional endpoint. The URL shipped in the workflow (`Call AI Model`) is only an **example**; replace it
+  with your own endpoint.
 
-## Instalasi
+## Installation
 
-### 1. Clone repo
+### 1. Clone the repository
 
 ```bash
-git clone https://github.com/0xMinomus/n8n-ceknilai.git
-cd n8n-ceknilai
+git clone https://github.com/0xMinomus/n8n-vision-grader.git
+cd n8n-vision-grader
 ```
 
-### 2. Jalankan sidecar media (PDF → gambar)
+### 2. Start the media sidecar (PDF → images)
 
-Sidecar harus berada di **jaringan Docker yang sama dengan container n8n**. Default compose memakai
-network eksternal bernama `n8n_default` (nama network default docker-compose n8n).
+The sidecar must join **the same Docker network as the n8n container**. The compose file defaults to an
+external network named `n8n_default` (the default docker-compose network name for n8n).
 
 ```bash
-# Cek nama network n8n Anda lebih dulu:
-docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' <nama-container-n8n>
+# Check your n8n network name first:
+docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' <n8n-container-name>
 
-# Bila bukan n8n_default, ubah baris `name: n8n_default` di compose.media.yml, lalu:
+# If it is not n8n_default, edit the `name: n8n_default` line in compose.media.yml, then:
 docker compose -f compose.media.yml up -d --build
 ```
 
-Verifikasi sidecar dari dalam jaringan yang sama:
+Verify the sidecar from the same network:
 
 ```bash
 docker run --rm --network n8n_default curlimages/curl -s http://project2-media:8080/health
 # → {"status": "ok", "media_version": "media-v3", ...}
 ```
 
-Sidecar berjalan tanpa port yang dipublikasikan ke host, tanpa API key, read-only, dan dibatasi 1 CPU / 512 MB.
+The sidecar publishes no host port, holds no API keys, runs read-only, and is limited to 1 CPU / 512 MB.
 
-### 3. Impor workflow ke n8n
+### 3. Import the workflow into n8n
 
-Di n8n: **Workflows → … → Import from File →** pilih `penilai-otomatis-tugas.json`
-(atau salinan dari halaman [Releases](../../releases)). Workflow terimpor dalam keadaan **non-aktif**.
+In n8n: **Workflows → … → Import from File →** select `penilai-otomatis-tugas.json`
+(or grab a copy from the [Releases](../../releases) page). The workflow is imported as **inactive**.
 
-### 4. Siapkan kredensial (3 buah)
+### 4. Create the credentials (3 of them)
 
-Repo ini tidak memuat kredensial apa pun. Buat kredensial baru di n8n, lalu pilih pada node terkait:
+This repository ships **without any credentials**. Create new credentials in n8n and select them on the
+matching nodes:
 
-| Kredensial | Tipe n8n | Dipakai oleh | Catatan |
+| Credential | n8n type | Used by | Notes |
 |---|---|---|---|
-| Google Drive | `googleDriveOAuth2Api` | `Cari File Tugas`, `Download File` | OAuth2 client di Google Cloud Console (tipe **Web application**). |
-| Google Sheets | `googleSheetsOAuth2Api` | `Simpan ke Google Sheets`, `Baris Penutup` | Boleh memakai OAuth client yang sama. |
-| Endpoint AI | `openAiApi` (predefined credential) | `Panggil Model Router` | Isi **Base URL** endpoint AI Anda + API key. |
+| Google Drive | `googleDriveOAuth2Api` | `List Submission Files`, `Download File` | OAuth2 client from Google Cloud Console (type **Web application**). |
+| Google Sheets | `googleSheetsOAuth2Api` | `Save to Google Sheets`, `Closing Row` | The same OAuth client may be reused. |
+| AI endpoint | `openAiApi` (predefined credential) | `Call AI Model` | Set the **Base URL** of your AI endpoint plus its API key. |
 
-Untuk Google OAuth2, daftarkan **Authorized redirect URI** persis:
+For Google OAuth2, register the **Authorized redirect URI** exactly as:
 
 ```
-https://<URL-n8n-anda>/rest/oauth2-credential/callback
+https://<your-n8n-url>/rest/oauth2-credential/callback
 ```
 
-Aktifkan Google Drive API + Google Sheets API pada project Google Cloud, dan tambahkan akun Google Anda
-sebagai *test user* bila consent screen masih berstatus **Testing** (refresh token mode Testing kedaluwarsa
-7 hari — sambungkan ulang bila muncul error otentikasi).
+Enable the Google Drive API and Google Sheets API in your Google Cloud project, and add your Google account
+as a *test user* while the consent screen is in **Testing** mode (refresh tokens in Testing mode expire after
+7 days — reconnect the credential when that happens).
 
-### 5. Isi konfigurasi node
+### 5. Configure the nodes
 
-| Node | Yang perlu diatur |
+| Node | What to set |
 |---|---|
-| `Panggil Model Router` | URL endpoint AI, mis. `http://172.18.0.1:20128/v1/chat/completions` (gateway Docker ke host) atau `https://openrouter.ai/api/v1/chat/completions`. Pilih kredensial endpoint AI. |
-| `Susun Permintaan` | String `model` di dalam kode (contoh bawaan: model vision yang sudah diuji). Sesuaikan dengan model Anda. |
-| `Simpan ke Google Sheets` | **Document** + **Sheet** tujuan (header lihat langkah 6). |
-| `Baris Penutup` | Document + Sheet **yang sama** dengan node di atas. |
-| `Cari File Tugas`, `Download File` | Pilih kredensial Google Drive. |
-| `Simpan ke Google Sheets`, `Baris Penutup` | Pilih kredensial Google Sheets. |
+| `Call AI Model` | URL of your AI endpoint, e.g. `http://172.18.0.1:20128/v1/chat/completions` (Docker gateway to the host) or `https://openrouter.ai/api/v1/chat/completions`. Pick the AI credential. |
+| `Build AI Request` | The `model` string inside the code (default: a vision model tested with this workflow). Match your endpoint's model. |
+| `Save to Google Sheets` | **Document** + **Sheet** for the results (headers, see step 6). |
+| `Closing Row` | The **same** Document + Sheet as above. |
+| `List Submission Files`, `Download File` | Select the Google Drive credential. |
+| `Save to Google Sheets`, `Closing Row` | Select the Google Sheets credential. |
 
-> Node sidecar (`Render Soal PDF`, `Render PDF Siswa`) memanggil `http://project2-media:8080/render-pdf` —
-> pastikan nama service/network sesuai compose Anda.
+> The sidecar nodes (`Render Exam PDF`, `Render Student PDF`) call `http://project2-media:8080/render-pdf` —
+> make sure the service/network names match your compose file.
 
-### 6. Siapkan spreadsheet hasil
+### 6. Prepare the results spreadsheet
 
-Buat sheet dengan header **persis** di baris pertama:
+Create a sheet with these headers in the first row (exact spelling):
 
 ```
-Waktu | NIM | Nama | File | Nilai | Catatan
+Timestamp | Student ID | Name | File | Score | Notes
 ```
 
-Satu berkas = satu baris; setelah loop selesai ditambahkan satu baris ringkasan di kolom `Catatan`
-(`SELESAI: N dinilai, M perlu diperiksa (K nilai terisi)`).
+One file = one row. When the loop finishes, one summary row is appended in the `Notes` column:
+`DONE: N graded, M need review (K with scores)`.
 
-### 7. Aktifkan & jalankan
+### 7. Activate and run
 
-1. Aktifkan workflow (toggle **Active**).
-2. Buka URL form produksi: `https://<URL-n8n-anda>/form/<path-form>` (lihat tab **Production URL** pada node `Form Penilaian`).
-3. Isi form, tunggu proses selesai, lalu periksa Google Sheets.
+1. Toggle the workflow **Active**.
+2. Open the production form: `https://<your-n8n-url>/form/grade-assignments` (see the **Production URL** tab
+   on the `Grading Form` node).
+3. Submit the form, wait for the run to finish, then check Google Sheets.
 
-Estimasi kasar: **±18–25 detik per berkas** (bergantung kecepatan model AI Anda); 34 berkas ≈ 10–15 menit.
+Rough estimate: **±18–25 seconds per file** (depends on your AI endpoint); 34 files ≈ 10–15 minutes.
 
-## Bidang form
+## Form fields
 
-| Bidang | Wajib | Keterangan |
+| Field | Required | Description |
 |---|---|---|
-| Link Folder Google Drive | Ya | Folder berisi jawaban mahasiswa (PDF/JPG/PNG). |
-| Soal (file) | Ya | PDF atau JPG/PNG. Kunci jawaban boleh langsung ada di file ini (dibaca model sebagai gambar). |
-| Kunci Jawaban (teks) | Tidak | Dipakai bila kunci belum ada di file soal, mis. `1. B`, `2. A`, `3. Jawaban harus menyebut ...`. Kunci pilihan ganda di sini juga dipakai untuk penilaian PG deterministik. |
-| Bobot Soal (opsional) | Tidak | Contoh: `No.1 = 20% No.2 = 30%` atau `1: 20, 2: 30`. Tanpa isi = semua soal berbobot sama. |
+| Google Drive Folder Link | Yes | Folder containing the student submissions (PDF/JPG/PNG). |
+| Exam Sheet (file) | Yes | PDF or JPG/PNG. The answer key **may be included in this file** (read by the model as an image). |
+| Answer Key (text) | No | Used when the key is not part of the exam file, e.g. `1. B`, `2. A`, `3. The answer must mention ...`. Multiple-choice keys entered here also drive the deterministic MC grading. |
+| Question Weights (optional) | No | Example: `No.1 = 20% No.2 = 30%` or `1: 20, 2: 30`. Leave empty = all questions weigh the same. |
 
-## Aturan nama berkas & identitas
+## File naming & student identity
 
-- Nama berkas harus berpola **`NIM_Nama`** atau **`Nama_NIM`** (mis. `2412345678_Budi Santoso.pdf`).
-- NIM harus **8–16 digit angka** tanpa spasi/tanda baca. Identitas **hanya** diambil dari nama berkas —
-  tulisan nama/NIM di lembar jawaban sengaja diabaikan.
-- NIM dengan format tidak valid, **duplikat** antar berkas, atau **panjang digit berbeda dari mayoritas**
-  dalam satu kiriman → baris ditandai `PERLU DIPERIKSA` dan **tidak diberi nilai** (digit tidak dikoreksi otomatis).
-- Berkas `.docx` belum didukung — konversi ke PDF terlebih dahulu, mis.
-  `libreoffice --headless --convert-to pdf berkas.docx`.
+- File names must follow **`NIM_Name`** or **`Name_NIM`** (e.g. `2412345678_Budi Santoso.pdf`).
+- The student ID must be **8–16 digits** with no spaces or punctuation. Identity is taken **only** from the
+  file name — names/IDs written on the answer sheets are deliberately ignored.
+- Invalid format, **duplicate** IDs across files, or a **digit length different from the majority** (mode) in
+  one submission → the row is marked `NEEDS REVIEW` and receives **no score** (digits are never auto-corrected).
+- `.docx` files are not supported — convert them to PDF first, e.g.
+  `libreoffice --headless --convert-to pdf file.docx`.
 
-## Rubrik penilaian & bobot
+## Grading rubric & weights
 
-- Nilai akhir 0–100 = rata-rata skor seluruh soal dari model (skor per soal juga 0–100).
-- Bila kotak **Bobot Soal** diisi: nilai akhir = Σ(skor × bobot) / Σ(bobot); nomor tanpa bobot memakai
-  rata-rata bobot yang diberikan, bobot tidak valid (≤0, >100, atau nomor di luar jumlah soal) diabaikan
-  dan dicatat di kolom `Catatan`.
-- **Pilihan ganda deterministik**: huruf `pilihan` yang dikembalikan model dibandingkan oleh kode dengan
-  kunci PG yang di-parse dari kotak Kunci Jawaban (pola `1. B`, `2) c`, dst.) — benar = 100, salah = 0,
-  jawaban kosong = 0, tulisan buram = `PERLU DIPERIKSA`.
-- Instruksi apa pun yang tertulis di lembar jawaban mahasiswa diabaikan (hanya soal/kunci dosen yang jadi acuan).
-- `Catatan` memuat asal kunci, bobot yang dipakai, rincian nilai per soal, dan alasan singkat model.
+- Final score 0–100 = the average of all per-question scores returned by the model (per-question scores are also 0–100).
+- If **Question Weights** is filled in: final score = Σ(score × weight) / Σ(weight). Questions without a weight
+  use the average of the given weights; invalid weights (≤0, >100, or a question number beyond the question
+  count) are ignored and reported in the `Notes` column.
+- **Deterministic multiple choice**: the `choice` letter returned by the model is compared by code against the
+  MC key parsed from the Answer Key field (patterns like `1. B`, `2) c`, …) — correct = 100, wrong = 0,
+  empty answer = 0, unreadable handwriting = `NEEDS REVIEW`.
+- Any instructions written on a student's answer sheet are ignored (only the lecturer's exam sheet and key count).
+- `Notes` contains the key source, the weights used, the per-question breakdown, and a short model rationale.
 
-## Perilaku & batas
+## Behavior & limits
 
-- Semua berkas diproses **satu per iterasi**; jangan menaikkan `batchSize` pada node `Proses Satu File`
-  (pada uji nyata, berkas kedua tiap batch terlewat dan proses tidak menjadi lebih cepat).
-- **Batas render sidecar**: PDF ≤ 25 MiB, ≤ 12 halaman, ≤ 45 detik, total JPEG ≤ 5 MiB. Gagal render =
-  ditolak utuh (tidak ada halaman yang dipotong diam-diam).
-- **Batas permintaan AI**: body JSON ≤ 7 MiB; melebihi batas → baris `PERLU DIPERIKSA` (tanpa nilai),
-  bukan pemotongan halaman.
-- **`PERLU DIPERIKSA`** muncul untuk: halaman buram/tidak lengkap/ambigu, respons AI tidak valid/tidak
-  lengkap, kegagalan HTTP, NIM tidak valid/duplikat/berbeda pola. Semua alasan dikelompokkan di awal `Catatan`;
-  `Nilai` dibiarkan kosong. Ini berbeda dari "jawaban kosong mahasiswa" yang bernilai 0.
-- `max_tokens: 6000`, `temperature: 0`, timeout 300 detik — bila anggaran token habis sebelum JSON selesai,
-  baris ditandai `PERLU DIPERIKSA`.
+- Files are processed **one per iteration**; do not raise `batchSize` on the `Process One File` node
+  (in live testing the second file of each batch was skipped and the run was not any faster).
+- **Sidecar render limits**: PDF ≤ 25 MiB, ≤ 12 pages, ≤ 45 s, total JPEG ≤ 5 MiB. A failed render is rejected
+  as a whole — pages are never silently truncated.
+- **AI request limit**: JSON body ≤ 7 MiB; exceeding it produces a `NEEDS REVIEW` row (no score) instead of
+  truncating pages.
+- **`NEEDS REVIEW`** appears for: blurry/incomplete/ambiguous pages, invalid or incomplete AI responses, HTTP
+  failures, and invalid/duplicate/inconsistent student IDs. All reasons are grouped at the start of `Notes`
+  and `Score` is left empty. This is different from an empty student answer, which scores 0.
+- `max_tokens: 6000`, `temperature: 0`, timeout 300 s — if the token budget runs out before the JSON is
+  complete, the row is marked `NEEDS REVIEW`.
 
-## Konfigurasi lanjutan
+## Advanced configuration
 
-| Ingin mengubah | Lokasi | Catatan |
+| What to change | Where | Notes |
 |---|---|---|
-| Ketajaman hasil render PDF | `media-helper/server.py` → `RENDER_SCALE_PX` (kini 1200), `RENDER_JPEG_QUALITY` (kini 70) | Naikkan ke 1600 bila tulisan tangan sulit dibaca, naikkan juga `MEDIA_VERSION`, lalu build ulang sidecar. |
-| Batas halaman/ukuran render | `media-helper/server.py` (konstanta batas) | Diuji lewat `media-helper/tests/`. |
-| Model / parameter AI | Node `Susun Permintaan` (`model`, `max_tokens`, `temperature`) | Model **wajib** mendukung input gambar. |
-| Endpoint AI | Node `Panggil Model Router` (URL) + kredensial | Format OpenAI Chat Completions. Header `x-9router-token-saver` khusus router tertentu — boleh dihapus untuk provider lain. |
-| Jeda antar berkas | Node `Jeda Antar File` (`amount`, detik) | Menaikkan jeda membantu bila kena rate limit (HTTP 429). |
-| Operasi tulis sheet | Node `Simpan ke Google Sheets` | Bawaan `append`; ganti ke `update` bila ingin menimpa baris hasil revisi. |
-| Performa/manajemen memori n8n | Env container n8n | Disarankan `NODE_OPTIONS=--max-old-space-size=4096` untuk pemrosesan folder besar. |
+| PDF render sharpness | `media-helper/server.py` → `RENDER_SCALE_PX` (currently 1200), `RENDER_JPEG_QUALITY` (70) | Raise to 1600 when handwritten work is hard to read; also bump `MEDIA_VERSION`, then rebuild the sidecar. |
+| Render page/size limits | `media-helper/server.py` (limit constants) | Covered by the tests in `media-helper/tests/`. |
+| Model / AI parameters | `Build AI Request` node (`model`, `max_tokens`, `temperature`) | The model **must** support image input. |
+| AI endpoint | `Call AI Model` node (URL) + credential | OpenAI Chat Completions format. The `x-9router-token-saver` header is specific to certain routers — remove it for other providers. |
+| Delay between files | `Delay Between Files` node (`amount`, seconds) | Increasing the delay helps when hitting rate limits (HTTP 429). |
+| Sheet write operation | `Save to Google Sheets` node | Defaults to `append`; switch to `update` to overwrite revised rows. |
+| n8n memory tuning | n8n container env | `NODE_OPTIONS=--max-old-space-size=4096` is recommended for large folders. |
 
-## Struktur repo
+## Repository structure
 
 ```
 .
-├── penilai-otomatis-tugas.json   # Workflow n8n — impor via UI (berkas utama)
-├── compose.media.yml             # Sidecar render PDF → JPEG (project2-media)
+├── penilai-otomatis-tugas.json   # n8n workflow — import via the UI (main artifact)
+├── compose.media.yml             # PDF → JPEG render sidecar (project2-media)
 ├── media-helper/
-│   ├── Dockerfile                # Python 3.13 + poppler-utils, user non-root
-│   ├── server.py                 # /health, /render-pdf (stdlib saja)
-│   └── tests/                    # Unit test sidecar (python -m unittest)
+│   ├── Dockerfile                # Python 3.13 + poppler-utils, non-root user
+│   ├── server.py                 # /health, /render-pdf (standard library only)
+│   └── tests/                    # Sidecar unit tests (python -m unittest)
 ├── LICENSE                       # MIT
 ├── .gitignore
 └── README.md
 ```
 
-Menjalankan unit test sidecar (tanpa Docker):
+Run the sidecar unit tests (no Docker required):
 
 ```bash
 cd media-helper && python3 -m unittest discover -s tests -v
@@ -256,29 +255,29 @@ cd media-helper && python3 -m unittest discover -s tests -v
 
 ## Troubleshooting
 
-| Gejala | Penyebab umum & solusi |
+| Symptom | Likely cause & fix |
 |---|---|
-| `Error 400: redirect_uri_mismatch` saat menyambungkan Google | Authorized redirect URI di Google Cloud Console belum persis `https://<URL-n8n-anda>/rest/oauth2-credential/callback`. |
-| Node render gagal / `connection refused` ke `project2-media:8080` | Sidecar tidak berjalan atau berada di network berbeda. Cek `docker compose -f compose.media.yml ps` dan nama network di `compose.media.yml`. |
-| Semua baris `PERLU DIPERIKSA: HTTP 401/403 dari router` | Kredensial endpoint AI salah/base URL keliru. |
-| Model menjawab tapi JSON tidak valid | Model tidak mendukung input gambar atau terlalu kecil; ganti model vision dan/atau naikkan `max_tokens`. |
-| Banyak baris `PERLU DIPERIKSA: format NIM ...` | Nama berkas tidak berpola `NIM_Nama`/`Nama_NIM` atau NIM bukan 8–16 digit. |
-| Respons lambat sekali per berkas | Model/kuota provider; pertimbangkan model vision yang lebih cepat atau penurunan resolusi render. |
-| `Task execution aborted because runner became unresponsive` | Eksekusi terlalu berat: kurangi jumlah berkas per kiriman (pisahkan folder) dan naikkan heap n8n. |
-| Nilai terlihat "asal" / salah baca tulisan tangan | Naikkan `RENDER_SCALE_PX` ke 1600 dan/atau gunakan model yang lebih kuat; selalu tinjau hasil sebelum dipakai final. |
+| `Error 400: redirect_uri_mismatch` when connecting Google | The Authorized redirect URI in Google Cloud Console is not exactly `https://<your-n8n-url>/rest/oauth2-credential/callback`. |
+| Render nodes fail / `connection refused` to `project2-media:8080` | The sidecar is not running or sits on a different network. Check `docker compose -f compose.media.yml ps` and the network name in `compose.media.yml`. |
+| Every row shows `NEEDS REVIEW: HTTP 401/403 from the AI endpoint` | Wrong AI credential or Base URL. |
+| The model replies but the JSON is invalid | The model does not support image input or is too small; switch to a vision model and/or raise `max_tokens`. |
+| Many rows show `NEEDS REVIEW: invalid student ID format ...` | File names do not follow `NIM_Name`/`Name_NIM`, or the ID is not 8–16 digits. |
+| Very slow per file | Model/provider latency; consider a faster vision model or a lower render resolution. |
+| `Task execution aborted because runner became unresponsive` | The run is too heavy: process fewer files per submission (split the folder) and raise the n8n heap limit. |
+| Scores look off / handwriting misread | Raise `RENDER_SCALE_PX` to 1600 and/or use a stronger vision model; always review results before finalizing grades. |
 
-## Keamanan & privasi
+## Security & privacy
 
-- **Tanpa kredensial di repo**: seluruh referensi kredensial dihapus dari workflow; hubungkan ulang akun Anda
-  setelah impor. Jangan pernah menempelkan API key di parameter node — gunakan kredensial n8n.
-- **Data tugas** dikirim ke endpoint AI yang Anda konfigurasikan. Untuk data sensitif, gunakan endpoint
-  internal/self-hosted; pertimbangkan kebijakan retensi data provider.
-- **Sidecar** tidak membuka port ke host, tanpa kunci API, berjalan read-only, dan dibatasi resource;
-  ia hanya menerima PDF dan mengembalikan gambar.
-- **Spreadsheet** hanya dapat ditulis oleh akun OAuth yang Anda sambungkan; tidak ada kredensial yang
-  dikirim ke pihak ketiga selain endpoint AI pilihan Anda.
-- Hasil penilaian AI sebaiknya tetap **ditinjau dosen** sebelum dijadikan nilai final.
+- **No credentials in this repository**: every credential reference has been removed from the workflow —
+  connect your own accounts after importing. Never paste API keys into node parameters; use n8n credentials.
+- **Student data** is sent to the AI endpoint you configure. For sensitive data, use a self-hosted/internal
+  endpoint and consider the provider's data-retention policy.
+- **The sidecar** opens no host port, requires no API key, runs read-only with resource limits, and only
+  accepts PDFs and returns images.
+- **The spreadsheet** can only be written by the OAuth account you connect; no credentials are sent anywhere
+  except the AI endpoint you choose.
+- AI-graded results should still be **reviewed by the lecturer** before being used as final grades.
 
-## Lisensi
+## License
 
-Dirilis dengan lisensi [MIT](LICENSE) © 2026 Andika Putra.
+Released under the [MIT](LICENSE) license © 2026 Andika Putra.
